@@ -211,7 +211,7 @@ The two halves reload very differently, which matters when you change the code:
 - Tune the cadence: `POLL_MS` (Client poll interval, also returned to the
   Client) and `CACHE_TTL_MS` (Host probe cache) in `index.js`.
 
-[↑ back to top / back to 中文](#dsh-git-status-live-git-branch-indicator-for-the-dsh-workspace)
+[↑ back to top / back to 中文](#dsh-git-status--live-git-branch-indicator-for-the-dsh-workspace)
 
 </details>
 
@@ -373,6 +373,6 @@ plugin_manager remove_bundle   @local/dsh-git-status
 - 调整节奏：`index.js` 中的 `POLL_MS`（Client 轮询间隔，同时返回给 Client）与 `CACHE_TTL_MS`
   （Host 探测缓存）。
 
-[↑ 返回顶部 / back to English](#dsh-git-status-dsh-工作区实时-git-分支指示器)
+[↑ 返回顶部 / back to English](#dsh-git-status--dsh-工作区实时-git-分支指示器)
 
 </details>
