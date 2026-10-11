@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Branch Status",
+    "description": "Shows the live Git branch, upstream sync and working-tree state of every workspace directory, refreshed continuously below the composer."
+  }
+}
