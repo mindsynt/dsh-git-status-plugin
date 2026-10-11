@@ -533,7 +533,12 @@ window.__ModuleLoader__.load({
           // Split at the last '*' so the stem stays muted and the marker takes
           // the branch colour. The tail keeps the marker's trailing spaces, which
           // is what holds the following columns at their correct offset.
-          const markAt = art.lastIndexOf('*')
+          // `git log --graph` always puts a '*' on a commit line, so the guard is
+          // only there to keep an unexpected input from being sliced at -1; with
+          // no marker there is nothing to highlight, so the whole art reads as
+          // muted stem rather than as a coloured marker.
+          const found = art.lastIndexOf('*')
+          const markAt = found < 0 ? art.length : found
           children.push(h('span', { key: `${key}-stem`, className: 'dsgs-log__art' }, art.slice(0, markAt)))
           children.push(h('span', { key: `${key}-mark`, className: 'dsgs-log__mark' }, art.slice(markAt)))
           children.push(h('span', { key: `${key}-hash`, className: 'dsgs-log__hash' }, row.hash))
