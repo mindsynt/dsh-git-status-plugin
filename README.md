@@ -1,12 +1,18 @@
 # dsh-git-status — live Git branch indicator for the DSH workspace
 # dsh-git-status — DSH 工作区实时 Git 分支指示器
 
-> **Bilingual README** — English first, 中文 after. Every section mirrors its
-> counterpart 1:1. / **双语 README** —— 英文在前，中文在后，章节一一对应。
+**Language / 语言：** [🇬🇧 English](#english) · [🇨🇳 中文](#中文)
+
+Each language below is a click-to-toggle panel — English starts collapsed and
+中文 starts open. Click a panel header to fold or unfold it. /
+下面每种语言都是一个可点击切换的面板 —— 英文默认折叠，中文默认展开。点击面板标题即可折叠或展开。
 
 ---
 
 ## English
+
+<details>
+<summary><strong>🇬🇧 English</strong> &nbsp;—&nbsp; click to expand / click again to collapse</summary>
 
 Shows which Git branch each workspace is on, **refreshed continuously** — as a
 branch label directly after the workspace name in the Sidebar's workspace group
@@ -205,9 +211,16 @@ The two halves reload very differently, which matters when you change the code:
 - Tune the cadence: `POLL_MS` (Client poll interval, also returned to the
   Client) and `CACHE_TTL_MS` (Host probe cache) in `index.js`.
 
+[↑ back to top / back to 中文](#dsh-git-status-live-git-branch-indicator-for-the-dsh-workspace)
+
+</details>
+
 ---
 
 ## 中文
+
+<details open>
+<summary><strong>🇨🇳 中文</strong> &nbsp;—&nbsp; 点击折叠 / 再次点击展开</summary>
 
 持续刷新地显示每个工作区目录所在的 Git 分支 —— 以分支标签的形式紧跟在 Sidebar
 工作区分组标题中的工作区名称之后；完整信息则出现在 Session 行的悬停卡片以及
@@ -359,3 +372,7 @@ plugin_manager remove_bundle   @local/dsh-git-status
   Session 需要打开 `agents`/`workingDirectory` 来源。
 - 调整节奏：`index.js` 中的 `POLL_MS`（Client 轮询间隔，同时返回给 Client）与 `CACHE_TTL_MS`
   （Host 探测缓存）。
+
+[↑ 返回顶部 / back to English](#dsh-git-status-dsh-工作区实时-git-分支指示器)
+
+</details>
