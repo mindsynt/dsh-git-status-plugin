@@ -107,12 +107,15 @@ window.__ModuleLoader__.load({
       '.dsgs-log__head strong{color:var(--dsw-alias-label-primary);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dsgs-log__head .dsgs-mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dsgs-log__count{flex:none}',
-      '.dsgs-log__list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1;min-height:0}',
-      '.dsgs-log__row{display:grid;grid-template-columns:76px 168px minmax(0,1fr);gap:12px;align-items:baseline;padding:9px 14px;border-bottom:1px solid var(--dsw-alias-border-l1)}',
-      '.dsgs-log__row:hover{background:var(--dsw-alias-bg-overlay)}',
-      '.dsgs-log__hash{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--dsw-alias-brand-primary);white-space:nowrap}',
-      '.dsgs-log__meta{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '.dsgs-log__subject{font-size:12px;color:var(--dsw-alias-label-primary);min-width:0;overflow-wrap:anywhere}',
+      /* The branch tree is one <pre>: git draws the art column itself, so the
+         row reproduces `git log --graph` verbatim. The commit columns are inline
+         spans, styled but never laid out independently. */
+      '.dsgs-log__tree{margin:0;padding:12px 14px;overflow:auto;flex:1;min-height:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.75;white-space:pre-wrap;color:var(--dsw-alias-label-secondary)}',
+      '.dsgs-log__art{color:var(--dsw-alias-state-idle-primary)}',
+      '.dsgs-log__mark{color:var(--dsw-alias-brand-primary);font-weight:700}',
+      '.dsgs-log__hash{color:var(--dsw-alias-brand-primary)}',
+      '.dsgs-log__meta{color:var(--dsw-alias-label-secondary);opacity:.75}',
+      '.dsgs-log__subject{color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}',
       '.dsgs-log__note{padding:28px 14px;text-align:center;font-size:12px;color:var(--dsw-alias-label-secondary)}',
       '.dsgs-log__note strong{display:block;color:var(--dsw-alias-label-primary);font-weight:600;margin-bottom:5px}',
       '.dsgs-log__note button{margin-top:10px;font:inherit;font-size:12px;padding:3px 10px;border-radius:11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);cursor:pointer}',
@@ -511,6 +514,42 @@ window.__ModuleLoader__.load({
       return sameDay ? `${get('hour')}:${get('minute')}` : `${get('month')} ${day} ${get('hour')}:${get('minute')}`
     }
 
+    /**
+     * One child per line of `git log --graph`, in order. A commit line yields the
+     * art stem, its `*` marker, then the hash, meta, and subject; a connector
+     * line yields art only. Newlines are literal text, so the <pre> prints the
+     * tree exactly as Git drew it.
+     */
+    function timelineChildren(rows) {
+      const children = []
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i]
+        if (!row) continue
+        const art = typeof row.art === 'string' ? row.art : ''
+        const key = `${i}-${row.hash || 'art'}`
+        if (!row.hash) {
+          children.push(h('span', { key, className: 'dsgs-log__art' }, art))
+        } else {
+          // Split at the last '*' so the stem stays muted and the marker takes
+          // the branch colour. The tail keeps the marker's trailing spaces, which
+          // is what holds the following columns at their correct offset.
+          const markAt = art.lastIndexOf('*')
+          children.push(h('span', { key: `${key}-stem`, className: 'dsgs-log__art' }, art.slice(0, markAt)))
+          children.push(h('span', { key: `${key}-mark`, className: 'dsgs-log__mark' }, art.slice(markAt)))
+          children.push(h('span', { key: `${key}-hash`, className: 'dsgs-log__hash' }, row.hash))
+          const meta = [row.author, formatWhen(row.date)].filter(part => part).join(' · ')
+          if (meta.length > 0) {
+            children.push(' ')
+            children.push(h('span', { key: `${key}-meta`, className: 'dsgs-log__meta' }, meta))
+            children.push(' ')
+          }
+          children.push(h('span', { key: `${key}-subject`, className: 'dsgs-log__subject' }, row.subject || ''))
+        }
+        children.push('\n')
+      }
+      return children
+    }
+
     function buildGitView(translate, locale) {
       function LogView(props) {
         const cwd = useSessionDirectory(props)
@@ -568,11 +607,12 @@ window.__ModuleLoader__.load({
           ))
         }
         const rows = Array.isArray(data.log) ? data.log : []
+        const commits = rows.reduce((count, row) => count + (row && row.hash ? 1 : 0), 0)
         return h('div', { className: 'dsgs-log' },
           h('div', { key: 'head', className: 'dsgs-log__head' },
             h(Glyph, { className: 'dsgs-glyph' }),
             h('strong', null, data.branch || translate('detached')),
-            h('span', { className: 'dsgs-log__count' }, `${translate('commits')} · ${rows.length}`),
+            h('span', { className: 'dsgs-log__count' }, `${translate('commits')} · ${commits}`),
             typeof data.checkedAt === 'number'
               ? h('span', { className: 'dsgs-mono' }, `${translate('updated')} ${formatWhen(new Date(data.checkedAt).toISOString())}`)
               : null,
@@ -585,17 +625,7 @@ window.__ModuleLoader__.load({
           ),
           rows.length === 0
             ? h('div', { key: 'empty', className: 'dsgs-log__note' }, translate('noCommits'))
-            : h('ol', { key: 'list', className: 'dsgs-log__list' },
-              rows.map((row, index) => {
-                const when = formatWhen(row && row.date)
-                const author = row && row.author
-                return h('li', { key: `${(row && row.hash) || index}-${index}`, className: 'dsgs-log__row' },
-                  h('span', { className: 'dsgs-log__hash' }, (row && row.hash) || '—'),
-                  h('span', { className: 'dsgs-log__meta' }, [author, when].filter(part => part).join(' · ')),
-                  h('span', { className: 'dsgs-log__subject' }, (row && row.subject) || '')
-                )
-              })
-            )
+            : h('pre', { key: 'tree', className: 'dsgs-log__tree' }, timelineChildren(rows))
         )
       }
       return LogView

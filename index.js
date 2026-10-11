@@ -7,7 +7,9 @@
  *
  * Commit history is separate: `GET /api/git-status/log?dir=<path>` answers one
  * Session's working directory, on demand only, for a directory the Host already
- * probes. The log is cached far longer than the status, and is never part of the
+ * probes. It returns the branch's graph as ordered rows — one per line of
+ * `git log --graph` — so the Client can print the tree exactly as Git draws it.
+ * The log is cached far longer than the status, and is never part of the
  * polling cadence.
  *
  * Every probe is read-only. `GIT_OPTIONAL_LOCKS=0` keeps a monitoring call
@@ -29,8 +31,14 @@ const POLL_MS = 1500
 const MAX_DIRECTORIES = 32
 const MAX_STDOUT_BYTES = 256 * 1024
 
-/** Commit subject first, so free-form text never splits a field. */
-const LOG_FORMAT = '%s%x1f%h%x1f%cI%x1f%an'
+/**
+ * Commit subject last, so free-form text never splits a field.
+ *
+ * `%x1e` opens each commit line, immediately after `--graph` has drawn that
+ * commit's prefix, so splitting on it recovers the art column verbatim.
+ * Graph-only lines (`|\  `, `|/  `) carry no `%x1e` at all.
+ */
+const LOG_FORMAT = '%x1e%h%x1f%cI%x1f%an%x1f%s'
 
 const GIT_ENV = {
   ...process.env,
@@ -194,23 +202,36 @@ async function collectEntry(directory) {
 }
 
 /**
- * Fold one `git log --format=%s%x1f%h%x1f%cI%x1f%an` document into rows.
- * The subject comes first because it is the only free-form field, so the
- * remaining split is always exactly hash, date, author.
+ * Fold one `git log --graph --format=%x1e%h%x1f%cI%x1f%an%x1f%s` document into
+ * ordered rows, one per line, preserving the graph art column.
+ *
+ * A commit line is `<art>%x1e<hash>\x1f<date>\x1f<author>\x1f<subject>`: the
+ * art includes the `* ` that marks the commit's own column, so the row reproduces
+ * git's layout exactly when printed as-is. A line with no `%x1e` is a pure
+ * connector (`|\  `, `|/  `) and carries art only.
+ *
+ * The subject comes last because it is the only free-form field.
  */
 function parseLog(text) {
   const rows = []
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\r$/, '')
     if (line.length === 0) continue
-    const parts = line.split('\x1f')
-    const subject = parts[0]
-    if (subject === undefined || subject.length === 0) continue
+    const marker = line.indexOf('\x1e')
+    if (marker === -1) {
+      // Connector lines are meaningful even though they are whitespace-heavy;
+      // trim only for the emptiness test, never for the stored art.
+      if (line.trim().length === 0) continue
+      rows.push({ art: line })
+      continue
+    }
+    const fields = line.slice(marker + 1).split('\x1f')
     rows.push({
-      subject: subject || null,
-      hash: parts[1] || null,
-      date: parts[2] || null,
-      author: parts.length > 3 ? parts.slice(3).join('\x1f') : null
+      art: line.slice(0, marker),
+      hash: fields[0] || null,
+      date: fields[1] || null,
+      author: fields[2] || null,
+      subject: fields.length > 3 ? fields.slice(3).join('\x1f') : null
     })
   }
   return rows
@@ -238,7 +259,7 @@ async function logOf(ctx, directory, cache) {
   answer.branch = entry.branch
   answer.error = entry.error
   if (entry.state === 'repo') {
-    const outcome = await runGit(directory, ['log', '--no-decorate', `--format=${LOG_FORMAT}`, '-n', String(LOG_COUNT)])
+    const outcome = await runGit(directory, ['log', '--graph', '--no-decorate', `--format=${LOG_FORMAT}`, '-n', String(LOG_COUNT)])
     if (outcome.code === 0) {
       answer.log = parseLog(outcome.stdout)
       answer.error = null
