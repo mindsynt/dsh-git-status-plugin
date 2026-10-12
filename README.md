@@ -29,7 +29,7 @@ A DSH plugin that shows which Git branch each workspace directory is on,
 | Sidebar, workspace group header | `(branch)` right after the workspace name |
 | Session row, hover card | The full pill for that session's repository |
 | Files panel, directory action row | The pill for the directory the panel is showing |
-| Conversation → `git-log` | This session's last 20 commits, fetched when the tab opens |
+| Conversation → `git-log` | This session's last 20 commits as a branch tree, fetched when the tab opens |
 
 Everything is additive — no existing DSH element is replaced or hidden. A
 non-repository, a missing directory, or a probe error simply shows no label
@@ -88,7 +88,7 @@ stops polling.
 | Sidebar，工作区分组标题 | 工作区名称后紧跟 `(分支)` |
 | Session 行，悬停卡片 | 该 Session 所在仓库的完整药丸 |
 | Files 面板，目录操作行 | 面板当前目录对应的药丸 |
-| Conversation → `git-log` | 本 Session 最近 20 条提交，打开标签时抓取 |
+| Conversation → `git-log` | 本 Session 最近 20 条提交，以分支树呈现，打开标签时抓取 |
 
 全部内容都是叠加的 —— 不替换、也不隐藏任何现有的 DSH 元素。非仓库、目录不存在
 或探测出错时，干脆不显示标签，而不是显示一个错的。
