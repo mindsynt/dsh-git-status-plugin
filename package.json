@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-git-status",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shows the live Git branch, sync and working-tree state of every workspace directory, below the composer.",
   "private": true,
   "type": "module",
