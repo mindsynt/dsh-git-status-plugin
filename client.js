@@ -12,6 +12,11 @@ window.__ModuleLoader__.load({
     const MAX_ROWS = 5
     const MIN_POLL_MS = 500
     const MAX_POLL_MS = 60000
+    // How often the always-mounted workspace-header seat refreshes on its own.
+    // Deliberately outside the live poll: see the note above `subscribe`. It is
+    // gated on there being a label to update and on nobody polling faster, so it
+    // is silent when the sidebar is closed or a Strip is already refreshing.
+    const SLOW_REFRESH_MS = 30000
 
     const DICTIONARIES = {
       en: {
@@ -130,9 +135,16 @@ window.__ModuleLoader__.load({
     ].join('\n')
 
     /* ---------------------------------------------------------- */
-    /* One shared poll: a single in-flight request and a single    */
-    /* interval serve every rendered row; polling stops when the   */
-    /* last row unmounts.                                          */
+    /* One shared poll: one in-flight request and one interval serve */
+    /* every rendered row. The cadence stops when the last seat a   */
+    /* human can actually see unmounts, and never runs at all while */
+    /* the document is hidden.                                      */
+    /*                                                              */
+    /* The workspace-header seat is the exception. It lives in      */
+    /* `shell.overlay`, which AppFrame renders unconditionally, so  */
+    /* subscribing there would hold the fast cadence open for the   */
+    /* window's whole lifetime with nobody watching. It keeps its   */
+    /* own slow tick instead.                                       */
     /* ---------------------------------------------------------- */
     const state = { entries: [], error: null, pollMs: 1500, fetchedAt: null }
     const listeners = new Set()
@@ -145,8 +157,8 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One fetch. Whether anything schedules the next one is the caller's call. */
     async function refresh() {
-      if (listeners.size === 0) return
       if (controller !== null) controller.abort()
       const current = new AbortController()
       controller = current
@@ -189,18 +201,34 @@ window.__ModuleLoader__.load({
       notify()
     }
 
-    function reschedule() {
+    function visible() {
+      return typeof document === 'object' && document !== null && document.visibilityState === 'visible'
+    }
+
+    function stopTimer() {
       if (timer !== null) {
         clearInterval(timer)
         timer = null
       }
+    }
+
+    /** Arm the fast cadence, unless nobody is looking or the page is hidden. */
+    function reschedule() {
+      stopTimer()
       if (listeners.size === 0) return
+      if (!visible()) return
       timer = setInterval(() => { void refresh() }, state.pollMs)
     }
 
+    /**
+     * Arm the fast cadence for one seat a human can see: a Files panel strip
+     * or a Session hover card. The commit-log view fetches its own route on
+     * demand and does not use this. Always-mounted seats must not either, or
+     * the poll never stops.
+     */
     function subscribe(listener) {
       listeners.add(listener)
-      if (listeners.size === 1) {
+      if (listeners.size === 1 && visible()) {
         void refresh()
         reschedule()
       }
@@ -211,10 +239,7 @@ window.__ModuleLoader__.load({
             controller.abort()
             controller = null
           }
-          if (timer !== null) {
-            clearInterval(timer)
-            timer = null
-          }
+          stopTimer()
         }
       }
     }
@@ -748,20 +773,35 @@ window.__ModuleLoader__.load({
         useEffect(() => {
           workspaceItems = items
           sync()
+          // A workspace appearing or leaving changes the set the Host probes, so
+          // the labels need a fresh probe even though no Strip is mounted.
+          if (listeners.size === 0 && visible()) void refresh()
         }, [items])
 
         useEffect(() => {
-          const offPoll = subscribe(() => { sync() })
           const offLocale = locale && typeof locale.subscribe === 'function'
             ? locale.subscribe(() => { setTick(tick => tick + 1); sync() })
             : null
           // Rows mount and remount as groups fold and unfold, far faster than
-          // the poll cadence, so a heartbeat re-attaches the labels.
+          // the poll cadence, so a heartbeat re-attaches the labels. It only
+          // reads whatever the last poll wrote.
           const heartbeat = setInterval(() => sync(), 500)
+          // This seat is mounted unconditionally, so `subscribe` would hold the
+          // live cadence open for the whole time the window is open with nobody
+          // watching. Instead a slow tick carries the header labels alone, and
+          // only fetches when a label can actually be seen: no workspace rows in
+          // the DOM means the sidebar is closed and there is nothing to update,
+          // and a mounted Strip is already refreshing at its own cadence.
+          const slow = setInterval(() => {
+            if (!visible()) return
+            if (listeners.size > 0) return
+            if (document.querySelectorAll(`[data-row-key^="${HEADER_KEY}"]`).length === 0) return
+            void refresh()
+          }, SLOW_REFRESH_MS)
           return () => {
-            offPoll()
             if (offLocale !== null) offLocale()
             clearInterval(heartbeat)
+            clearInterval(slow)
           }
         }, [])
 
@@ -808,10 +848,18 @@ window.__ModuleLoader__.load({
         const gitView = buildGitView(translate, ctx.locale)
 
         ctx.effect(() => {
-          const onVisible = () => { if (document.visibilityState === 'visible') void refresh() }
-          document.addEventListener('visibilitychange', onVisible)
-          return () => document.removeEventListener('visibilitychange', onVisible)
-        }, 'dsh-git-status: refresh on visibility')
+          const onVisibility = () => {
+            if (visible()) {
+              if (listeners.size === 0) return
+              reschedule()
+              void refresh()
+            } else {
+              stopTimer()
+            }
+          }
+          document.addEventListener('visibilitychange', onVisibility)
+          return () => document.removeEventListener('visibilitychange', onVisibility)
+        }, 'dsh-git-status: poll only while visible')
 
         // Two seats on the Sidebar: the full pill inside a Session row's hover
         // card, and the workspace header label below. The row's leading cell is
