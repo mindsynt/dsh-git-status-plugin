@@ -1,9 +1,12 @@
 {
   "name": "@local/dsh-git-status",
   "version": "1.1.0",
-  "description": "Shows the live Git branch, sync and working-tree state of every workspace directory, below the composer.",
+  "description": "Shows the live Git branch, sync and working-tree state of every workspace directory, in the sidebar, the Files panel and a commit-log tab.",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "icon": "./icon.svg",
   "exports": {
     ".": "./index.js",

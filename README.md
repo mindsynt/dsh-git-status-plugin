@@ -19,8 +19,8 @@ A DSH plugin that shows which Git branch each workspace directory is on,
 - **Upstream sync** — the `↑/↓` ahead/behind counts against the tracking branch.
 - **Working-tree changes** — the `● n` count of files that differ from `HEAD`.
 - The short **`HEAD` hash**.
-- Four failure states instead of guessing: `not a git repository`,
-  `missing directory`, `no commits yet`, and `error`.
+- Five failure states instead of guessing: `not a git repository`,
+  `missing directory`, `a bare repository`, `no commits yet`, and `error`.
 
 ### Where it shows
 
@@ -78,8 +78,8 @@ stops polling.
 - **上游同步** —— 相对跟踪分支的 `↑/↓` 领先/落后计数。
 - **工作区改动** —— 相对 `HEAD` 的文件差异数 `● n`。
 - `HEAD` **短哈希**。
-- 四种明确的失败状态，而不是靠猜：`not a git repository`、`missing directory`、
-  `no commits yet`、`error`。
+- 五种明确的失败状态，而不是靠猜：`not a git repository`、`missing directory`、
+  `裸仓库`、`尚无提交`、`error`。
 
 ### 显示在哪
 

@@ -17,6 +17,9 @@ window.__ModuleLoader__.load({
     // gated on there being a label to update and on nobody polling faster, so it
     // is silent when the sidebar is closed or a Strip is already refreshing.
     const SLOW_REFRESH_MS = 30000
+    // How long the header-label sync coalesces DOM mutations before it runs:
+    // rows mount and remount in bursts, and one pass per burst is enough.
+    const HEADER_SYNC_THROTTLE_MS = 150
 
     const DICTIONARIES = {
       en: {
@@ -40,6 +43,7 @@ window.__ModuleLoader__.load({
         directory: 'directory',
         notGitRepo: 'not a git repository',
         missingDir: 'directory missing',
+        bare: 'bare repository',
         unavailable: 'git status unavailable',
         noCommits: 'no commits yet',
         updated: 'updated',
@@ -73,6 +77,7 @@ window.__ModuleLoader__.load({
         directory: '目录',
         notGitRepo: '不是 Git 仓库',
         missingDir: '目录不存在',
+        bare: '裸仓库',
         unavailable: '无法获取 Git 状态',
         noCommits: '尚无提交',
         updated: '更新于',
@@ -277,9 +282,7 @@ window.__ModuleLoader__.load({
         if (entry.upstreamGone) bits.push(`${translate('upstream')} ${entry.upstream} ${translate('error')}`)
         return bits.filter(Boolean).join(', ')
       }
-      if (entry.state === 'not-a-repo') return translate('notGitRepo')
-      if (entry.state === 'missing') return translate('missingDir')
-      return translate('error')
+      return stateText(translate, entry)
     }
 
     function normalizePath(path) {
@@ -354,10 +357,11 @@ window.__ModuleLoader__.load({
       return entry.dirty ? 'dsgs-dirty' : 'dsgs-clean'
     }
 
-    /** The words a non-repository, a missing directory, or a probe error get. */
+    /** The words a non-repository, a missing directory, a bare repository, or a probe error get. */
     function stateText(translate, entry) {
       if (entry.state === 'not-a-repo') return translate('notGitRepo')
       if (entry.state === 'missing') return translate('missingDir')
+      if (entry.state === 'bare') return translate('bare')
       return translate('error')
     }
 
@@ -519,24 +523,32 @@ window.__ModuleLoader__.load({
     // The directory comes from the global `useSessions` standard prop, the same
     // way the Session seats find theirs, so no Session is bound or retained.
 
+    /**
+     * The formatters behind `formatWhen`, built once. Constructing
+     * `Intl.DateTimeFormat` per call is measurable across a 20-row tree, and
+     * the resolved locale comes from the browser's own setting, which does not
+     * change without a page reload — so one set serves the page's lifetime.
+     */
+    const WHEN_FORMATTERS = {
+      stamp: new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      day: new Intl.DateTimeFormat(undefined, { day: 'numeric' }),
+      year: new Intl.DateTimeFormat(undefined, { year: 'numeric' })
+    }
+
     /** Render one `%cI` value as "14:32" or "Jul 21 14:32". */
     function formatWhen(iso) {
       const when = typeof iso === 'string' ? new Date(iso) : null
       if (when === null || Number.isNaN(when.getTime())) return ''
-      const parts = new Intl.DateTimeFormat(
-        undefined,
-        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
-      ).formatToParts(when)
+      const { stamp, day, year } = WHEN_FORMATTERS
+      const parts = stamp.formatToParts(when)
       const get = (type) => {
         const hit = parts.find(part => part.type === type)
         return hit ? hit.value : ''
       }
-      const day = new Intl.DateTimeFormat(undefined, { day: 'numeric' }).format(when)
+      const dayOfMonth = day.format(when)
       const now = new Date()
-      const sameDay = new Intl.DateTimeFormat(undefined, { day: 'numeric' }).format(now) === day
-        && new Intl.DateTimeFormat(undefined, { year: 'numeric' }).format(when)
-          === new Intl.DateTimeFormat(undefined, { year: 'numeric' }).format(now)
-      return sameDay ? `${get('hour')}:${get('minute')}` : `${get('month')} ${day} ${get('hour')}:${get('minute')}`
+      const sameDay = day.format(now) === dayOfMonth && year.format(when) === year.format(now)
+      return sameDay ? `${get('hour')}:${get('minute')}` : `${get('month')} ${dayOfMonth} ${get('hour')}:${get('minute')}`
     }
 
     /**
@@ -783,24 +795,43 @@ window.__ModuleLoader__.load({
             ? locale.subscribe(() => { setTick(tick => tick + 1); sync() })
             : null
           // Rows mount and remount as groups fold and unfold, far faster than
-          // the poll cadence, so a heartbeat re-attaches the labels. It only
-          // reads whatever the last poll wrote.
-          const heartbeat = setInterval(() => sync(), 500)
+          // the poll cadence, so the observer re-attaches the labels on those
+          // mutations. It only reads whatever the last poll wrote. The sync's
+          // own writes are attribute mutations, which the observer does not
+          // watch, so it never observes itself.
+          let syncScheduled = false
+          const scheduleSync = () => {
+            if (syncScheduled) return
+            syncScheduled = true
+            setTimeout(() => {
+              syncScheduled = false
+              if (visible()) sync()
+            }, HEADER_SYNC_THROTTLE_MS)
+          }
+          const rowObserver = new MutationObserver(scheduleSync)
+          rowObserver.observe(document.body, { childList: true, subtree: true })
+          // Mutations coalesced while the document was hidden were skipped, so
+          // becoming visible runs one pass over the last known state.
+          const onVisibility = () => { if (visible()) scheduleSync() }
+          document.addEventListener('visibilitychange', onVisibility)
           // This seat is mounted unconditionally, so `subscribe` would hold the
           // live cadence open for the whole time the window is open with nobody
           // watching. Instead a slow tick carries the header labels alone, and
           // only fetches when a label can actually be seen: no workspace rows in
           // the DOM means the sidebar is closed and there is nothing to update,
-          // and a mounted Strip is already refreshing at its own cadence.
+          // and a mounted Strip is already refreshing at its own cadence. The
+          // sync follows the fetch, because with no Strip mounted nothing else
+          // mutates the DOM when the fetched state changes.
           const slow = setInterval(() => {
             if (!visible()) return
             if (listeners.size > 0) return
             if (document.querySelectorAll(`[data-row-key^="${HEADER_KEY}"]`).length === 0) return
-            void refresh()
+            void refresh().then(scheduleSync)
           }, SLOW_REFRESH_MS)
           return () => {
             if (offLocale !== null) offLocale()
-            clearInterval(heartbeat)
+            rowObserver.disconnect()
+            document.removeEventListener('visibilitychange', onVisibility)
             clearInterval(slow)
           }
         }, [])

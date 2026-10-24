@@ -29,6 +29,10 @@ const LOG_TTL_MS = 30000
 const LOG_COUNT = 20
 const POLL_MS = 1500
 const MAX_DIRECTORIES = 32
+/** How many directories probe at once: one slow mount must not stretch the
+ * whole snapshot serially, but an unbounded fan-out could spawn 64 git
+ * processes in one burst. */
+const PROBE_CONCURRENCY = 8
 const MAX_STDOUT_BYTES = 256 * 1024
 
 /**
@@ -38,23 +42,37 @@ const MAX_STDOUT_BYTES = 256 * 1024
  * commit's prefix, so splitting on it recovers the art column verbatim.
  * Graph-only lines (`|\  `, `|/  `) carry no `%x1e` at all.
  */
-const LOG_FORMAT = '%x1e%h%x1f%cI%x1f%an%x1f%s'
+export const LOG_FORMAT = '%x1e%h%x1f%cI%x1f%an%x1f%s'
 
-const GIT_ENV = {
-  ...process.env,
+/**
+ * Git needs PATH, HOME and the user's git config, and every command here is
+ * local and read-only, so nothing needs credentials: credential-shaped
+ * variables are dropped so they cannot reach the child environment.
+ */
+const GIT_ENV = {}
+for (const [name, value] of Object.entries(process.env)) {
+  if (/(key|secret|token|password)/i.test(name)) continue
+  GIT_ENV[name] = value
+}
+Object.assign(GIT_ENV, {
   LC_ALL: 'C',
   LC_MESSAGES: 'C',
   LANGUAGE: 'C',
   GIT_OPTIONAL_LOCKS: '0',
   GIT_TERMINAL_PROMPT: '0'
-}
+})
 
 /** Run one read-only git invocation with a bounded timeout and bounded output. */
-function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
+export function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false
-    let stdout = ''
-    let stderr = ''
+    // Chunks are collected as Buffers and decoded once at close: decoding each
+    // chunk separately corrupts a multibyte character that straddles the
+    // boundary between two chunks.
+    const stdoutChunks = []
+    const stderrChunks = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
     let child
     try {
       child = spawn('git', ['-C', directory, ...args], {
@@ -69,7 +87,12 @@ function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ code, note, stdout, stderr })
+      resolve({
+        code,
+        note,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8')
+      })
     }
     const timer = setTimeout(() => {
       if (!settled) {
@@ -79,10 +102,14 @@ function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
     }, timeoutMs)
     if (typeof timer.unref === 'function') timer.unref()
     child.stdout.on('data', (chunk) => {
-      if (stdout.length < MAX_STDOUT_BYTES) stdout += chunk.toString('utf8')
+      if (stdoutBytes >= MAX_STDOUT_BYTES) return
+      stdoutChunks.push(chunk)
+      stdoutBytes += chunk.length
     })
     child.stderr.on('data', (chunk) => {
-      if (stderr.length < MAX_STDOUT_BYTES) stderr += chunk.toString('utf8')
+      if (stderrBytes >= MAX_STDOUT_BYTES) return
+      stderrChunks.push(chunk)
+      stderrBytes += chunk.length
     })
     child.on('error', (error) => finish(-1, String(error?.message ?? error)))
     child.on('close', (code, signal) => finish(code ?? -1, signal ? `terminated by ${signal}` : undefined))
@@ -91,8 +118,21 @@ function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
 
 const emptyChanges = () => ({ modified: 0, added: 0, deleted: 0, renamed: 0, copied: 0, unmerged: 0, untracked: 0 })
 
+/**
+ * One porcelain status character to one bucket, in priority order. A file
+ * whose index and worktree states both changed (`MM`, `AM`, `UU`) counts once
+ * in the first matching bucket, so the breakdown always sums to `changeCount`.
+ */
+const CHANGE_BUCKETS = [
+  ['R', 'renamed'],
+  ['C', 'copied'],
+  ['A', 'added'],
+  ['D', 'deleted'],
+  ['M', 'modified']
+]
+
 /** Fold one `git status --porcelain --branch` document into display data. */
-function parseStatus(text) {
+export function parseStatus(text) {
   const result = {
     branch: null,
     upstream: null,
@@ -137,15 +177,14 @@ function parseStatus(text) {
       continue
     }
     const code = line.slice(0, 2)
-    for (const character of code) {
-      if (character === 'M') result.changes.modified += 1
-      else if (character === 'A') result.changes.added += 1
-      else if (character === 'D') result.changes.deleted += 1
-      else if (character === 'R') result.changes.renamed += 1
-      else if (character === 'C') result.changes.copied += 1
-      else if (character === 'U') result.changes.unmerged += 1
+    if (code === '??') {
+      result.changes.untracked += 1
+    } else if (code.includes('U') || code === 'AA' || code === 'DD') {
+      result.changes.unmerged += 1
+    } else {
+      const bucket = CHANGE_BUCKETS.find(([character]) => code.includes(character))
+      if (bucket !== undefined) result.changes[bucket[1]] += 1
     }
-    if (code === '??') result.changes.untracked += 1
     result.changeCount += 1
   }
   return result
@@ -188,6 +227,10 @@ async function collectEntry(directory) {
     entry.state = 'missing'
     return entry
   }
+  if (/this operation must be run in a work tree/i.test(noise)) {
+    entry.state = 'bare'
+    return entry
+  }
   if (status.code !== 0) {
     entry.error = firstLine(status.stderr) ?? status.note ?? 'git status failed'
     return entry
@@ -212,7 +255,7 @@ async function collectEntry(directory) {
  *
  * The subject comes last because it is the only free-form field.
  */
-function parseLog(text) {
+export function parseLog(text) {
   const rows = []
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\r$/, '')
@@ -242,19 +285,24 @@ function parseLog(text) {
  *
  * The directory must be in the Host's own probed set: this route takes a path
  * from the browser, and without the check the Client could make the Host run
- * git in any directory at all.
+ * git in any directory at all. The path is normalized the way
+ * `knownDirectories` normalizes its own entries, so a trailing or duplicated
+ * slash in the query parameter still matches.
  */
-async function logOf(ctx, directory, cache) {
+async function logOf(ctx, directory, statusCache, logCache) {
+  directory = normalizeDirectory(directory)
   const answer = { directory, state: 'error', branch: null, log: [], error: null, checkedAt: Date.now() }
   const allowed = knownDirectories(ctx).map(row => row.directory)
-  if (typeof directory !== 'string' || directory.length === 0 || !allowed.includes(directory)) {
+  if (directory.length === 0 || !allowed.includes(directory)) {
     answer.state = 'unknown'
     answer.error = 'directory is not in the probed set'
     return answer
   }
-  const hit = cache.get(directory)
+  const hit = logCache.get(directory)
   if (hit !== undefined && hit.expiresAt > Date.now()) return { ...hit.entry }
-  const entry = await collectEntry(directory)
+  // A fresh status probe answers state and branch without spawning git again,
+  // and a fresh result is written back so the status route can reuse it too.
+  const entry = await cachedEntry(statusCache, directory)
   answer.state = entry.state
   answer.branch = entry.branch
   answer.error = entry.error
@@ -275,8 +323,14 @@ async function logOf(ctx, directory, cache) {
     answer.error = null
   }
   answer.checkedAt = Date.now()
-  cache.set(directory, { expiresAt: answer.checkedAt + LOG_TTL_MS, entry: answer })
+  logCache.set(directory, { expiresAt: answer.checkedAt + LOG_TTL_MS, entry: answer })
   return answer
+}
+
+/** Fold duplicate slashes and trailing slashes, which name the same directory. */
+export function normalizeDirectory(value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
 }
 
 /** Directories worth reporting: registered workspaces, live Sessions, default. */
@@ -284,8 +338,7 @@ function knownDirectories(ctx) {
   const out = []
   const seen = new Set()
   const add = (value, source) => {
-    if (typeof value !== 'string' || value.length === 0) return
-    const key = value.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+    const key = normalizeDirectory(value)
     if (key.length === 0 || seen.has(key)) return
     seen.add(key)
     out.push({ directory: key, source })
@@ -305,24 +358,42 @@ function knownDirectories(ctx) {
   return out.slice(0, MAX_DIRECTORIES)
 }
 
+/** Drop expired entries once the cache holds far more keys than any snapshot. */
+function evictExpired(cache) {
+  if (cache.size <= MAX_DIRECTORIES * 2) return
+  for (const key of cache.keys()) {
+    if (cache.size <= MAX_DIRECTORIES * 2) break
+    if (cache.get(key).expiresAt <= Date.now()) cache.delete(key)
+  }
+}
+
+/** One cached entry, or a fresh probe written back to the cache. */
+async function cachedEntry(cache, directory) {
+  const hit = cache.get(directory)
+  if (hit !== undefined && hit.expiresAt > Date.now()) return hit.entry
+  const entry = await collectEntry(directory)
+  cache.set(directory, { expiresAt: Date.now() + CACHE_TTL_MS, entry })
+  evictExpired(cache)
+  return entry
+}
+
 async function snapshotOf(ctx, cache) {
   const checkedAt = Date.now()
-  const entries = []
-  for (const { directory, source } of knownDirectories(ctx)) {
-    const hit = cache.get(directory)
-    let entry = hit && hit.expiresAt > Date.now() ? hit.entry : null
-    if (entry === null) {
-      entry = await collectEntry(directory)
-      cache.set(directory, { expiresAt: Date.now() + CACHE_TTL_MS, entry })
-      if (cache.size > MAX_DIRECTORIES * 2) {
-        for (const key of cache.keys()) {
-          if (cache.size <= MAX_DIRECTORIES * 2) break
-          if (cache.get(key).expiresAt <= Date.now()) cache.delete(key)
-        }
-      }
+  const known = knownDirectories(ctx)
+  const entries = new Array(known.length)
+  // A worker per slot pulls the next unprobed directory until the list runs
+  // out, so results land in `known` order regardless of which worker finishes.
+  let next = 0
+  const probe = async () => {
+    while (next < known.length) {
+      const index = next
+      next += 1
+      const { directory, source } = known[index]
+      const entry = await cachedEntry(cache, directory)
+      entries[index] = { ...entry, source, checkedAt }
     }
-    entries.push({ ...entry, source, checkedAt })
   }
+  await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, known.length) }, probe))
   // Registered workspaces lead, then live Session directories, then the default;
   // alphabetical within a group so the order is stable between polls.
   const rank = { workspace: 0, session: 1, default: 2 }
@@ -381,7 +452,7 @@ export function apply(ctx) {
       fetch: async (request) => {
         try {
           const url = new URL(request.url)
-          return jsonResponse(await logOf(ctx, url.searchParams.get('dir') ?? '', logCache), 200)
+          return jsonResponse(await logOf(ctx, url.searchParams.get('dir') ?? '', cache, logCache), 200)
         } catch (error) {
           ctx.logger?.warn?.('dsh-git-status: log collection failed', error)
           return jsonResponse({
