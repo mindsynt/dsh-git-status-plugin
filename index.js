@@ -21,6 +21,13 @@
 
 import { spawn } from 'node:child_process'
 
+/**
+ * Fixed cadences and limits. The plugin deliberately ships no settings: one
+ * Host serves every window, and these are protocol choices rather than
+ * deployment-dependent tunables — POLL_MS pairs with CACHE_TTL_MS, LOG_COUNT
+ * bounds the rendered tree, PROBE_CONCURRENCY bounds the process fan-out.
+ */
+
 const ROUTE_PATH = '/api/git-status'
 const LOG_ROUTE_PATH = '/api/git-status/log'
 const GIT_TIMEOUT_MS = 3000
@@ -116,7 +123,7 @@ export function runGit(directory, args, timeoutMs = GIT_TIMEOUT_MS) {
   })
 }
 
-const emptyChanges = () => ({ modified: 0, added: 0, deleted: 0, renamed: 0, copied: 0, unmerged: 0, untracked: 0 })
+const emptyChanges = () => ({ modified: 0, added: 0, deleted: 0, renamed: 0, copied: 0, typechange: 0, unmerged: 0, untracked: 0 })
 
 /**
  * One porcelain status character to one bucket, in priority order. A file
@@ -126,6 +133,7 @@ const emptyChanges = () => ({ modified: 0, added: 0, deleted: 0, renamed: 0, cop
 const CHANGE_BUCKETS = [
   ['R', 'renamed'],
   ['C', 'copied'],
+  ['T', 'typechange'],
   ['A', 'added'],
   ['D', 'deleted'],
   ['M', 'modified']
@@ -287,9 +295,11 @@ export function parseLog(text) {
  * from the browser, and without the check the Client could make the Host run
  * git in any directory at all. The path is normalized the way
  * `knownDirectories` normalizes its own entries, so a trailing or duplicated
- * slash in the query parameter still matches.
+ * slash in the query parameter still matches. `fresh` skips the log cache for
+ * an explicit user refresh; the probed-directory check and the status cache
+ * still apply.
  */
-async function logOf(ctx, directory, statusCache, logCache) {
+async function logOf(ctx, directory, statusCache, logCache, fresh = false) {
   directory = normalizeDirectory(directory)
   const answer = { directory, state: 'error', branch: null, log: [], error: null, checkedAt: Date.now() }
   const allowed = knownDirectories(ctx).map(row => row.directory)
@@ -299,7 +309,7 @@ async function logOf(ctx, directory, statusCache, logCache) {
     return answer
   }
   const hit = logCache.get(directory)
-  if (hit !== undefined && hit.expiresAt > Date.now()) return { ...hit.entry }
+  if (!fresh && hit !== undefined && hit.expiresAt > Date.now()) return { ...hit.entry }
   // A fresh status probe answers state and branch without spawning git again,
   // and a fresh result is written back so the status route can reuse it too.
   const entry = await cachedEntry(statusCache, directory)
@@ -327,10 +337,19 @@ async function logOf(ctx, directory, statusCache, logCache) {
   return answer
 }
 
-/** Fold duplicate slashes and trailing slashes, which name the same directory. */
+/**
+ * Fold duplicate slashes and trailing slashes, which name the same directory.
+ * On Windows, backslash is a separator, not a filename character, so it folds
+ * too; elsewhere it is left alone.
+ *
+ * Known gaps, recorded: paths compare literally after this fold, so a
+ * symlinked path whose realpath was registered, and case-differing spellings
+ * on a case-insensitive filesystem, do not match.
+ */
 export function normalizeDirectory(value) {
   if (typeof value !== 'string') return ''
-  return value.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+  const slashed = process.platform === 'win32' ? value.replace(/\\/g, '/') : value
+  return slashed.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
 }
 
 /** Directories worth reporting: registered workspaces, live Sessions, default. */
@@ -452,7 +471,7 @@ export function apply(ctx) {
       fetch: async (request) => {
         try {
           const url = new URL(request.url)
-          return jsonResponse(await logOf(ctx, url.searchParams.get('dir') ?? '', cache, logCache), 200)
+          return jsonResponse(await logOf(ctx, url.searchParams.get('dir') ?? '', cache, logCache, url.searchParams.has('fresh')), 200)
         } catch (error) {
           ctx.logger?.warn?.('dsh-git-status: log collection failed', error)
           return jsonResponse({

@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
         deleted: 'deleted',
         renamed: 'renamed',
         copied: 'copied',
+        typechange: 'type change',
         unmerged: 'unmerged',
         untracked: 'untracked',
         ahead: 'ahead {count}',
@@ -66,6 +67,7 @@ window.__ModuleLoader__.load({
         deleted: '删除',
         renamed: '重命名',
         copied: '复制',
+        typechange: '类型变更',
         unmerged: '冲突未解决',
         untracked: '未跟踪',
         ahead: '领先 {count}',
@@ -151,7 +153,7 @@ window.__ModuleLoader__.load({
     /* window's whole lifetime with nobody watching. It keeps its   */
     /* own slow tick instead.                                       */
     /* ---------------------------------------------------------- */
-    const state = { entries: [], error: null, pollMs: 1500, fetchedAt: null }
+    const state = { entries: [], error: null, pollMs: 1500, fetchedAt: null, failures: 0 }
     const listeners = new Set()
     let controller = null
     let timer = null
@@ -179,7 +181,9 @@ window.__ModuleLoader__.load({
           // Keep the last known rows visible (dimmed) rather than blanking the
           // strip: the branch name is still useful while polling is failing.
           state.error = 'network'
+          state.failures += 1
           notify()
+          reschedule()
         }
         return
       }
@@ -188,22 +192,25 @@ window.__ModuleLoader__.load({
       try { body = await response.json() } catch { /* malformed body */ }
       if (!response.ok || !body || typeof body !== 'object') {
         state.error = `HTTP ${response.status}`
+        state.failures += 1
         notify()
+        reschedule()
         return
       }
       if (Array.isArray(body.entries)) {
         state.entries = body.entries.filter(entry => entry && typeof entry === 'object')
       }
       if (typeof body.pollMs === 'number' && Number.isFinite(body.pollMs)) {
-        const next = Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, Math.round(body.pollMs)))
-        if (next !== state.pollMs) {
-          state.pollMs = next
-          reschedule()
-        }
+        state.pollMs = Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, Math.round(body.pollMs)))
       }
       if (typeof body.checkedAt === 'number') state.fetchedAt = body.checkedAt
       state.error = null
+      state.failures = 0
       notify()
+      // Every settled fetch rearms the cadence: the delay follows the new
+      // failure count, and a fetch slower than the delay can never overlap
+      // the next one.
+      reschedule()
     }
 
     function visible() {
@@ -217,12 +224,22 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The delay until the next poll. Consecutive failures double it (1.5 s →
+     * 3 → 6 … capped at MAX_POLL_MS) so a downed or erroring Host is not
+     * hammered at the live cadence; one success resets it.
+     */
+    function delayOf() {
+      if (state.failures === 0) return state.pollMs
+      return Math.min(MAX_POLL_MS, state.pollMs * 2 ** Math.min(state.failures, 6))
+    }
+
     /** Arm the fast cadence, unless nobody is looking or the page is hidden. */
     function reschedule() {
       stopTimer()
       if (listeners.size === 0) return
       if (!visible()) return
-      timer = setInterval(() => { void refresh() }, state.pollMs)
+      timer = setInterval(() => { void refresh() }, delayOf())
     }
 
     /**
@@ -261,7 +278,7 @@ window.__ModuleLoader__.load({
     }
 
     function describeChanges(translate, entry) {
-      const order = ['modified', 'added', 'deleted', 'renamed', 'copied', 'unmerged', 'untracked']
+      const order = ['modified', 'added', 'deleted', 'renamed', 'copied', 'typechange', 'unmerged', 'untracked']
       return order
         .filter(key => entry.changes[key] > 0)
         .map(key => `${entry.changes[key]} ${translate(key)}`)
@@ -380,6 +397,14 @@ window.__ModuleLoader__.load({
           if (entry.ahead > 0) bits.push(`↑${entry.ahead}`)
           if (entry.behind > 0) bits.push(`↓${entry.behind}`)
           parts.push(h('span', { key: 'sync', className: 'dsgs-sync', title: syncText(translate, entry) }, bits.join(' ')))
+        } else if (entry.upstreamGone) {
+          // No counts to show, but the tracking branch is gone: keep an
+          // indicator on the pill itself, since the tooltip alone is invisible.
+          parts.push(h('span', {
+            key: 'sync',
+            className: 'dsgs-sync',
+            title: `${translate('upstream')} ${entry.upstream} ${translate('error')}`
+          }, '↑↓!'))
         }
         parts.push(h('span', {
           key: 'status',
@@ -559,14 +584,19 @@ window.__ModuleLoader__.load({
      */
     function timelineChildren(rows) {
       const children = []
+      // Commit rows key on the hash, which identifies the commit and is unique
+      // within one `git log` output. Connector lines carry no identity beyond
+      // their order in the tree, so they key on their running number.
+      let connectors = 0
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i]
         if (!row) continue
         const art = typeof row.art === 'string' ? row.art : ''
-        const key = `${i}-${row.hash || 'art'}`
         if (!row.hash) {
-          children.push(h('span', { key, className: 'dsgs-log__art' }, art))
+          connectors += 1
+          children.push(h('span', { key: `connector-${connectors}`, className: 'dsgs-log__art' }, art))
         } else {
+          const key = row.hash
           // Split at the last '*' so the stem stays muted and the marker takes
           // the branch colour. The tail keeps the marker's trailing spaces, which
           // is what holds the following columns at their correct offset.
@@ -608,7 +638,11 @@ window.__ModuleLoader__.load({
           let live = true
           setData(null)
           setFailed(null)
-          fetch(`${LOG_ROUTE}?dir=${encodeURIComponent(cwd)}`, {
+          // `reload` counts manual refreshes and retries, which pass fresh=1 so
+          // the Host's 30 s log cache cannot swallow them; opening the tab may
+          // still hit the cache, which is what the cache is for.
+          const fresh = reload > 0 ? '&fresh=1' : ''
+          fetch(`${LOG_ROUTE}?dir=${encodeURIComponent(cwd)}${fresh}`, {
             headers: { accept: 'application/json' },
             cache: 'no-store'
           })

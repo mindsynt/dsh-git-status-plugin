@@ -76,10 +76,17 @@ describe('parseStatus', () => {
       deleted: 1,
       renamed: 1,
       copied: 0,
+      typechange: 0,
       unmerged: 0,
       untracked: 1
     })
     assert.equal(result.changeCount, 4)
+  })
+
+  it('counts a typechanged file in its own bucket', () => {
+    const result = parseStatus('## main\nT  f\n')
+    assert.equal(result.changes.typechange, 1)
+    assert.equal(result.changeCount, 1)
   })
 
   it('reads ahead, behind and a gone upstream', () => {
